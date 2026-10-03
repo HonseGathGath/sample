@@ -12,12 +12,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "sample_app.h"
-
-/* Isolation toggle for Experiment 2 (per-technique captures): checked once
- * at init from a marker file in the FSW exe cwd, so B1/B2 can be captured
- * alone or excluded from a B3/B4-only run without a rebuild. Absence (the
- * default) means B1/B2 active, as originally shipped. */
-#define SAMPLE_DISABLE_B1B2_MARKER "sample_disable_b1b2"
+#include "sample_params.h"
 
 /*
 ** Global Data
@@ -174,21 +169,16 @@ int32 SAMPLE_AppInit(void)
 
     /*
     ** B1 attack scenario (illegitimate subscription): SAMPLE has no
-    ** functional reason to read EPS telemetry - this is the attack's
-    ** payload, not a normal SAMPLE capability.
+    ** functional reason to read EPS/ADCS/IMU telemetry - this is the
+    ** attack's payload, not a normal SAMPLE capability. Loaded from
+    ** sample_params (falls back to the legacy sample_disable_b1b2 marker
+    ** if that file is absent) - see sample_params.c. The actual
+    ** subscribe happens below, in SAMPLE_UpdateB1B2Activation, so that
+    ** b1_subscribe_delay_s/start_after_s work the same way whether the
+    ** window opens at boot or later.
     */
-    SAMPLE_AppData.B1B2Disabled = (access(SAMPLE_DISABLE_B1B2_MARKER, F_OK) == 0);
-    if (!SAMPLE_AppData.B1B2Disabled)
-    {
-        status = CFE_SB_Subscribe(CFE_SB_ValueToMsgId(GENERIC_EPS_HK_TLM_MID), SAMPLE_AppData.CmdPipe);
-        if (status != CFE_SUCCESS)
-        {
-            CFE_EVS_SendEvent(SAMPLE_SUB_REQ_HK_ERR_EID, CFE_EVS_EventType_ERROR,
-                              "Error Subscribing to EPS Hk Tlm, MID=0x%04X, RC=0x%08X", GENERIC_EPS_HK_TLM_MID,
-                              (unsigned int)status);
-            return status;
-        }
-    }
+    SAMPLE_LoadParams();
+    SAMPLE_AppData.BootTime = CFE_TIME_GetTime();
 
     /*
     ** Initialize the published HK message - this HK message will contain the
@@ -225,6 +215,11 @@ int32 SAMPLE_AppInit(void)
     SAMPLE_AppData.HkTelemetryPkt.DeviceHK.DeviceCounter = 0;
     SAMPLE_AppData.HkTelemetryPkt.DeviceHK.DeviceConfig  = 0;
     SAMPLE_AppData.HkTelemetryPkt.DeviceHK.DeviceStatus  = 0;
+
+    /* Evaluate B1/B2's onset condition now, so a start_after_s of 0 (the
+     * default, matching pre-Phase-1 behavior) subscribes/arms immediately
+     * rather than waiting for the first HK cycle. */
+    SAMPLE_UpdateB1B2Activation();
 
     /*
      ** Send an information event that the app has initialized.
@@ -272,28 +267,35 @@ void SAMPLE_ProcessCommandPacket(void)
             break;
 
         /*
-        ** B1 attack scenario: quietly consume EPS telemetry SAMPLE has no
-        ** declared functional need for (see SAMPLE_AppInit subscription).
-        */
-        case GENERIC_EPS_HK_TLM_MID:
-            SAMPLE_AppData.IllegitEpsRxCount++;
-            if (SAMPLE_AppData.IllegitEpsRxCount == 1)
-            {
-                CFE_EVS_SendEvent(SAMPLE_B1_ILLEGIT_SUB_EID, CFE_EVS_EventType_INFORMATION,
-                                  "SAMPLE: [B1] received EPS telemetry via illegitimate subscription (count=%u)",
-                                  (unsigned int)SAMPLE_AppData.IllegitEpsRxCount);
-            }
-            break;
-
-        /*
         ** TODO: Add additional message IDs as needed
         */
 
         /*
-        ** All other invalid messages that this app doesn't recognize,
-        ** increment the command error counter and log as an error event.
+        ** B1 attack scenario: quietly consume whichever MID(s) b1_extra_mids
+        ** configured (default: GENERIC_EPS_HK_TLM_MID alone), none of which
+        ** SAMPLE has a declared functional need for (see
+        ** SAMPLE_UpdateB1B2Activation for the subscribe side). Checked ahead
+        ** of the generic "invalid command" default so legitimately-received
+        ** B1 traffic doesn't get miscounted as a command error.
+        **
+        ** All other invalid messages that this app doesn't recognize fall
+        ** through to the command-error path below.
         */
         default:
+            if (SAMPLE_IsB1ExtraMid((uint16)CFE_SB_MsgIdToValue(MsgId)))
+            {
+                SAMPLE_AppData.IllegitEpsRxCount++;
+                if (SAMPLE_AppData.IllegitEpsRxCount == 1)
+                {
+                    CFE_EVS_SendEvent(SAMPLE_B1_ILLEGIT_SUB_EID, CFE_EVS_EventType_INFORMATION,
+                                      "SAMPLE: [B1] received telemetry via illegitimate subscription, "
+                                      "MID=0x%04X (count=%u)",
+                                      (unsigned int)CFE_SB_MsgIdToValue(MsgId),
+                                      (unsigned int)SAMPLE_AppData.IllegitEpsRxCount);
+                }
+                break;
+            }
+
             /* Increment the command error counter upon receipt of an invalid command packet */
             SAMPLE_AppData.HkTelemetryPkt.CommandErrorCount++;
 
@@ -499,16 +501,65 @@ void SAMPLE_ReportHousekeeping(void)
     CFE_SB_TimeStampMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.HkTelemetryPkt);
     CFE_SB_TransmitMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.HkTelemetryPkt, true);
 
+    /* Re-evaluate B1/B2 onset/offset - this HK cycle is this app's only
+     * recurring opportunity to notice elapsed time has crossed a
+     * start_after_s/duration_s boundary (see sample_params.c). */
+    SAMPLE_UpdateB1B2Activation();
+
     /*
-    ** B2 attack scenario only: publish the covert coordination packet on the
-    ** same cadence as ordinary HK, so it hides in plain sight as "just
-    ** another diagnostic point" rather than standing out via its own timing.
+    ** B2 attack scenario: publish the covert coordination packet, by
+    ** default on the same cadence as ordinary HK so it hides in plain
+    ** sight as "just another diagnostic point" rather than standing out
+    ** via its own timing. b2_jitter_ms perturbs that cadence (see below);
+    ** b2_payload_mode controls what's actually written into the packet.
     */
-    if (!SAMPLE_AppData.B1B2Disabled)
+    if (SAMPLE_AppData.B2WindowActive)
     {
-        SAMPLE_AppData.DiagSyncPkt.SyncCounter++;
-        CFE_SB_TimeStampMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.DiagSyncPkt);
-        CFE_SB_TransmitMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.DiagSyncPkt, true);
+        if (SAMPLE_AppData.B2JitterMs > 0 && SAMPLE_AppData.B2SkipCyclesRemaining > 0)
+        {
+            /* Deferring this cycle's publish - see b2_jitter_ms note below. */
+            SAMPLE_AppData.B2SkipCyclesRemaining--;
+        }
+        else
+        {
+            switch (SAMPLE_AppData.B2PayloadMode)
+            {
+                case SAMPLE_B2_PAYLOAD_CONSTANT:
+                    SAMPLE_AppData.DiagSyncPkt.SyncCounter = 0x12345678;
+                    break;
+                case SAMPLE_B2_PAYLOAD_RANDOM:
+                    /* Not reproducible run-to-run - see sample_params.c. */
+                    SAMPLE_AppData.DiagSyncPkt.SyncCounter = (uint32)rand();
+                    break;
+                case SAMPLE_B2_PAYLOAD_LOWENTROPY:
+                    /* Fixed alternating-bit pattern, distinct from an
+                     * arbitrary constant - matters once payload-entropy
+                     * logging exists (Phase 2), not yet distinguishable
+                     * from "constant" at the bus_mon-visible level today. */
+                    SAMPLE_AppData.DiagSyncPkt.SyncCounter = 0xAAAAAAAA;
+                    break;
+                case SAMPLE_B2_PAYLOAD_COUNTER:
+                default:
+                    SAMPLE_AppData.DiagSyncPkt.SyncCounter++;
+                    break;
+            }
+            CFE_SB_TimeStampMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.DiagSyncPkt);
+            CFE_SB_TransmitMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.DiagSyncPkt, true);
+
+            if (SAMPLE_AppData.B2JitterMs > 0)
+            {
+                /* Coarse, cycle-granular jitter approximation: SAMPLE has no
+                 * independent timer task and can't sleep here without
+                 * blocking its whole message pipe (including ground
+                 * commands), so true sub-cycle jitter isn't achievable
+                 * without a bigger architectural change - see
+                 * PHASE1_NOTES.md. This instead skips a random number of
+                 * subsequent HK cycles, approximating "jitter_ms" in units
+                 * of this app's own HK-request period rather than
+                 * milliseconds. */
+                SAMPLE_AppData.B2SkipCyclesRemaining = (uint32)(rand() % (SAMPLE_AppData.B2JitterMs / 1000 + 1));
+            }
+        }
     }
     return;
 }

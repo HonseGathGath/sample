@@ -51,4 +51,12 @@
 /* B1 attack scenario instrumentation only - not part of upstream SAMPLE */
 #define SAMPLE_B1_ILLEGIT_SUB_EID 50
 
+/* Phase 1 simulation-rigor: onset/offset markers for B1's subscription
+ * window and B2's publish window, so ground truth is recoverable from the
+ * event log timestamp, not just inferred from params. */
+#define SAMPLE_B1_ONSET_EID  51
+#define SAMPLE_B1_OFFSET_EID 52
+#define SAMPLE_B2_ONSET_EID  53
+#define SAMPLE_B2_OFFSET_EID 54
+
 #endif /* _SAMPLE_EVENTS_H_ */

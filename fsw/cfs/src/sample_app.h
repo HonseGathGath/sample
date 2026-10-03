@@ -28,13 +28,27 @@
 /* Internal-Bus IDS project - B1 attack scenario (illegitimate subscription).
  * SAMPLE has no functional reason to read EPS telemetry; this simulates a
  * supply-chain-compromised COTS component quietly reading power-system
- * data it was never designed to see. */
+ * data it was never designed to see. Also pull in a couple of other HK
+ * MIDs that are equally "none of SAMPLE's business" so b1_extra_mids can
+ * offer more than one unrelated-MID option (see PHASE1_NOTES.md). */
 #include "generic_eps_msgids.h"
+#include "generic_adcs_msgids.h"
+#include "generic_imu_msgids.h"
 
 /*
 ** Specified pipe depth - how many messages will be queued in the pipe
 */
 #define SAMPLE_PIPE_DEPTH 32
+
+/* B2 payload-mode selector values (sample_params key b2_payload_mode) */
+#define SAMPLE_B2_PAYLOAD_COUNTER    0
+#define SAMPLE_B2_PAYLOAD_CONSTANT   1
+#define SAMPLE_B2_PAYLOAD_RANDOM     2
+#define SAMPLE_B2_PAYLOAD_LOWENTROPY 3
+
+/* Up to this many additional "unrelated" MIDs for the B1 variant
+ * (b1_extra_mids); kept small and fixed-size, no dynamic allocation. */
+#define SAMPLE_B1_MAX_EXTRA_MIDS 4
 
 /*
 ** Enabled and Disabled Definitions
@@ -77,10 +91,32 @@ typedef struct
 
     /* B1 attack scenario instrumentation only - not part of upstream SAMPLE */
     uint32 IllegitEpsRxCount;
-    bool   B1B2Disabled;
+    bool   B1B2Disabled; /* legacy marker-file result, kept for fallback (see sample_params.c) */
 
     /* B2 attack scenario only - covert coordination packet (see sample_msg.h) */
     SAMPLE_DiagSync_tlm_t DiagSyncPkt;
+
+    /* Phase 1 simulation-rigor params, loaded once at init from sample_params
+     * (see sample_params.c) with the legacy marker file as a fallback when
+     * that file is absent. */
+    bool   B1Enabled;
+    bool   B2Enabled;
+    uint16 B1ExtraMids[SAMPLE_B1_MAX_EXTRA_MIDS];
+    uint8  B1ExtraMidCount;
+    uint32 B1SubscribeDelayS;
+    uint32 StartAfterS;
+    uint32 DurationS; /* 0 = unset = active for the whole run, matching prior behavior */
+    int    B2PayloadMode;
+    uint32 B2JitterMs;
+
+    /* Runtime onset/offset state, re-evaluated once per HK cycle (this app
+     * has no independent timer task - see PHASE1_NOTES.md for why cycle
+     * granularity, not true wall-clock granularity, is what's achievable
+     * here without a bigger architectural change). */
+    CFE_TIME_SysTime_t BootTime;
+    bool               B1Subscribed;
+    bool               B2WindowActive;
+    uint32             B2SkipCyclesRemaining; /* jitter approximation, see sample_params.c */
 
 } SAMPLE_AppData_t;
 
