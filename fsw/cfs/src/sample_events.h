@@ -48,4 +48,7 @@
 #define SAMPLE_UART_INIT_ERR_EID  40
 #define SAMPLE_UART_CLOSE_ERR_EID 41
 
+/* B1 attack scenario instrumentation only - not part of upstream SAMPLE */
+#define SAMPLE_B1_ILLEGIT_SUB_EID 50
+
 #endif /* _SAMPLE_EVENTS_H_ */

@@ -25,6 +25,12 @@
 #include "mgr_msg.h"
 #include "mgr_msgids.h"
 
+/* Internal-Bus IDS project - B1 attack scenario (illegitimate subscription).
+ * SAMPLE has no functional reason to read EPS telemetry; this simulates a
+ * supply-chain-compromised COTS component quietly reading power-system
+ * data it was never designed to see. */
+#include "generic_eps_msgids.h"
+
 /*
 ** Specified pipe depth - how many messages will be queued in the pipe
 */
@@ -68,6 +74,13 @@ typedef struct
     ** TODO: Make specific to your application
     */
     uart_info_t SampleUart; /* Hardware protocol definition */
+
+    /* B1 attack scenario instrumentation only - not part of upstream SAMPLE */
+    uint32 IllegitEpsRxCount;
+    bool   B1B2Disabled;
+
+    /* B2 attack scenario only - covert coordination packet (see sample_msg.h) */
+    SAMPLE_DiagSync_tlm_t DiagSyncPkt;
 
 } SAMPLE_AppData_t;
 

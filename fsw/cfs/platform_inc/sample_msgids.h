@@ -25,4 +25,9 @@
 #define SAMPLE_HK_TLM_MID     0x08FA /* TODO: Change this for your app */
 #define SAMPLE_DEVICE_TLM_MID 0x08FB /* TODO: Change this for your app */
 
+/* Internal-Bus IDS project - B2 attack scenario (covert coordination
+ * channel). Framed as an innocuous diagnostic-sync packet; DIAG_SVC is
+ * the colluding subscriber. */
+#define SAMPLE_DIAG_SYNC_TLM_MID 0x0900
+
 #endif /* _SAMPLE_MSGIDS_H_ */

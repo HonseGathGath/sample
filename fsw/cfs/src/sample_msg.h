@@ -84,4 +84,16 @@ typedef struct
 } __attribute__((packed)) SAMPLE_Hk_tlm_t;
 #define SAMPLE_HK_TLM_LNGTH sizeof(SAMPLE_Hk_tlm_t)
 
+/*
+** B2 attack scenario only - covert coordination packet, disguised as a
+** mundane diagnostic-sync telemetry point. Not part of upstream SAMPLE.
+*/
+typedef struct
+{
+    CFE_MSG_TelemetryHeader_t TlmHeader;
+    uint32                    SyncCounter;
+
+} __attribute__((packed)) SAMPLE_DiagSync_tlm_t;
+#define SAMPLE_DIAG_SYNC_TLM_LNGTH sizeof(SAMPLE_DiagSync_tlm_t)
+
 #endif /* _SAMPLE_MSG_H_ */

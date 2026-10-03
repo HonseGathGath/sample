@@ -10,7 +10,14 @@
 ** Include Files
 */
 #include <arpa/inet.h>
+#include <unistd.h>
 #include "sample_app.h"
+
+/* Isolation toggle for Experiment 2 (per-technique captures): checked once
+ * at init from a marker file in the FSW exe cwd, so B1/B2 can be captured
+ * alone or excluded from a B3/B4-only run without a rebuild. Absence (the
+ * default) means B1/B2 active, as originally shipped. */
+#define SAMPLE_DISABLE_B1B2_MARKER "sample_disable_b1b2"
 
 /*
 ** Global Data
@@ -166,6 +173,24 @@ int32 SAMPLE_AppInit(void)
     */
 
     /*
+    ** B1 attack scenario (illegitimate subscription): SAMPLE has no
+    ** functional reason to read EPS telemetry - this is the attack's
+    ** payload, not a normal SAMPLE capability.
+    */
+    SAMPLE_AppData.B1B2Disabled = (access(SAMPLE_DISABLE_B1B2_MARKER, F_OK) == 0);
+    if (!SAMPLE_AppData.B1B2Disabled)
+    {
+        status = CFE_SB_Subscribe(CFE_SB_ValueToMsgId(GENERIC_EPS_HK_TLM_MID), SAMPLE_AppData.CmdPipe);
+        if (status != CFE_SUCCESS)
+        {
+            CFE_EVS_SendEvent(SAMPLE_SUB_REQ_HK_ERR_EID, CFE_EVS_EventType_ERROR,
+                              "Error Subscribing to EPS Hk Tlm, MID=0x%04X, RC=0x%08X", GENERIC_EPS_HK_TLM_MID,
+                              (unsigned int)status);
+            return status;
+        }
+    }
+
+    /*
     ** Initialize the published HK message - this HK message will contain the
     ** telemetry that has been defined in the SAMPLE_HkTelemetryPkt for this app.
     */
@@ -182,6 +207,10 @@ int32 SAMPLE_AppInit(void)
     /*
     ** TODO: Initialize any other messages that this app will publish
     */
+
+    /* B2 attack scenario only - covert coordination packet */
+    CFE_MSG_Init(CFE_MSG_PTR(SAMPLE_AppData.DiagSyncPkt.TlmHeader), CFE_SB_ValueToMsgId(SAMPLE_DIAG_SYNC_TLM_MID),
+                 SAMPLE_DIAG_SYNC_TLM_LNGTH);
 
     /*
     ** Always reset all counters during application initialization
@@ -240,6 +269,20 @@ void SAMPLE_ProcessCommandPacket(void)
         */
         case MGR_HK_TLM_MID:
             SAMPLE_ProcessMgrHk();
+            break;
+
+        /*
+        ** B1 attack scenario: quietly consume EPS telemetry SAMPLE has no
+        ** declared functional need for (see SAMPLE_AppInit subscription).
+        */
+        case GENERIC_EPS_HK_TLM_MID:
+            SAMPLE_AppData.IllegitEpsRxCount++;
+            if (SAMPLE_AppData.IllegitEpsRxCount == 1)
+            {
+                CFE_EVS_SendEvent(SAMPLE_B1_ILLEGIT_SUB_EID, CFE_EVS_EventType_INFORMATION,
+                                  "SAMPLE: [B1] received EPS telemetry via illegitimate subscription (count=%u)",
+                                  (unsigned int)SAMPLE_AppData.IllegitEpsRxCount);
+            }
             break;
 
         /*
@@ -455,6 +498,18 @@ void SAMPLE_ReportHousekeeping(void)
     /* Time stamp and publish housekeeping telemetry */
     CFE_SB_TimeStampMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.HkTelemetryPkt);
     CFE_SB_TransmitMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.HkTelemetryPkt, true);
+
+    /*
+    ** B2 attack scenario only: publish the covert coordination packet on the
+    ** same cadence as ordinary HK, so it hides in plain sight as "just
+    ** another diagnostic point" rather than standing out via its own timing.
+    */
+    if (!SAMPLE_AppData.B1B2Disabled)
+    {
+        SAMPLE_AppData.DiagSyncPkt.SyncCounter++;
+        CFE_SB_TimeStampMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.DiagSyncPkt);
+        CFE_SB_TransmitMsg((CFE_MSG_Message_t *)&SAMPLE_AppData.DiagSyncPkt, true);
+    }
     return;
 }
 
